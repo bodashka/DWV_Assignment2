@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>Internet Traffic Map</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: sans-serif;
+        }
+
+        #overlay {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            width: 300px;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 10px;
+            border-radius: 8px;
+        }
+
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="webgl"></canvas>
+    <div id="overlay">
+        <canvas id="packetChart"></canvas>
+    </div>
+
+    <!-- Load dependencies -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <script>
+        const canvas = document.getElementById('webgl');
+        const renderer = new THREE.WebGLRenderer({ canvas });
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+        renderer.setSize(width, height);
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.OrthographicCamera(width / -2, width / 2, height / 2, height / -2, 1, 1000);
+        camera.position.z = 5;
+
+        const mapWidth = width;
+        const mapHeight = height;
+
+        // Load world map
+        const loader = new THREE.TextureLoader();
+        loader.load('https://upload.wikimedia.org/wikipedia/commons/8/83/Equirectangular_projection_SW.jpg', (texture) => {
+            const geometry = new THREE.PlaneGeometry(mapWidth, mapHeight);
+            const material = new THREE.MeshBasicMaterial({ map: texture });
+            const mapMesh = new THREE.Mesh(geometry, material);
+            scene.add(mapMesh);
+        });
+
+        // Convert lat/lon to x/y for equirectangular projection
+        function latLonToXY(lat, lon) {
+            const x = (lon + 180) * (mapWidth / 360) - mapWidth / 2;
+            const y = (90 - lat) * (mapHeight / 180) - mapHeight / 2;
+            return { x, y };
+        }
+
+        const dots = [];
+
+        function addDot(lat, lon, isSuspicious) {
+            const { x, y } = latLonToXY(lat, lon);
+            const dotGeometry = new THREE.CircleGeometry(4, 12);
+            const dotMaterial = new THREE.MeshBasicMaterial({
+                color: isSuspicious ? 0xff0000 : 0x00ff00,
+                transparent: true
+            });
+            const dot = new THREE.Mesh(dotGeometry, dotMaterial);
+            dot.position.set(x, y, 1);
+            scene.add(dot);
+            dots.push({ mesh: dot, time: Date.now() });
+
+            // Add to chart data
+            updateChart(isSuspicious);
+        }
+
+        // Chart.js setup
+        const ctx = document.getElementById('packetChart').getContext('2d');
+        let packetLog = [];
+        const chart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: ['Normal', 'Suspicious'],
+                datasets: [{
+                    label: 'Packets (last 10s)',
+                    data: [0, 0],
+                    backgroundColor: ['#00cc00', '#cc0000']
+                }]
+            },
+            options: {
+                responsive: true,
+                animation: false,
+                scales: {
+                    y: { beginAtZero: true }
+                }
+            }
+        });
+
+        function updateChart(isSuspicious) {
+            const now = Date.now();
+            packetLog.push({ time: now, suspicious: isSuspicious });
+
+            // Keep only recent 10s
+            packetLog = packetLog.filter(p => now - p.time <= 10000);
+
+            const normalCount = packetLog.filter(p => !p.suspicious).length;
+            const suspiciousCount = packetLog.filter(p => p.suspicious).length;
+            chart.data.datasets[0].data = [normalCount, suspiciousCount];
+            chart.update();
+        }
+
+        // Animate and fade dots
+        function animate() {
+            requestAnimationFrame(animate);
+            const now = Date.now();
+            dots.forEach((d, i) => {
+                const age = (now - d.time) / 3000;
+                d.mesh.material.opacity = Math.max(0, 1 - age);
+                if (age > 1) {
+                    scene.remove(d.mesh);
+                    dots.splice(i, 1);
+                }
+            });
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // Connect to Flask SSE endpoint
+        const source = new EventSource('http://localhost:5000/stream');
+        source.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            addDot(data.lat, data.lon, data.suspicious);
+        };
+
+        // Create labels for cities to check the lon/lat conversion
+        const labelContainer = document.createElement('div');
+        labelContainer.style.position = 'absolute';
+        labelContainer.style.top = '0';
+        labelContainer.style.left = '0';
+        labelContainer.style.pointerEvents = 'none';
+        document.body.appendChild(labelContainer);
+
+        function addCityLabel(name, lat, lon) {
+            const {x, y} = latLonToXY(lat, lon);
+
+            const label = document.createElement('div');
+            label.textContent = name;
+            label.style.position = 'absolute';
+            label.style.color = 'black';
+            label.style.background = 'rgba(255, 255, 255, 0.8)';
+            label.style.padding = '2px 4px';
+            label.style.borderRadius = '4px';
+            label.style.fontSize = '12px';
+            label.style.left = `${x + window.innerWidth / 2}px`;
+            label.style.top = `${y + window.innerHeight / 2}px`;
+            labelContainer.appendChild(label);
+        }
+
+        const testCities = [
+        {name: 'New York', lat: 40.7128, lon: -74.0060 },
+        {name: 'London', lat: 51.5074, lon: -0.1278 },
+        {name: 'Tokyo', lat: 35.6895, lon: 139.6917 },
+        {name: 'Sydney', lat: -33.8688, lon: 151.2093 },
+        {name: 'Moscow', lat: 55.755833, lon: 37.617778 },
+        ];
+
+        testCities.forEach(city => {
+                            addCityLabel(city.name, city.lat, city.lon);
+        });
+
+    </script>
+</body>
+
+</html>
